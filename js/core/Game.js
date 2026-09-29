@@ -1,11 +1,13 @@
 /**
  * Game Core Orchestrator
  */
-import { CANVAS, WORLD, PIPE_CONFIG, GAME_STATES } from '../config.js';
+import { CANVAS, WORLD, GAME_STATES, STAR_CONFIG } from '../config.js';
 import { Player } from '../entities/Player.js';
 import { EnemyManager } from '../entities/EnemyManager.js';
 import { Physics } from '../systems/Physics.js';
 import { ParticleSystem } from '../systems/ParticleSystem.js';
+import { SoundManager } from '../systems/SoundManager.js';
+import { Background } from '../systems/Background.js';
 import { HUD } from '../ui/HUD.js';
 import { InputHandler } from './InputHandler.js';
 import { GameLoop } from './GameLoop.js';
@@ -17,32 +19,32 @@ export class Game {
 
         this.currentState = GAME_STATES.IDLE;
         this.score = 0;
-        this.groundOffset = 0;
+        this.currentStars = 0;
+        this.frames = 0;
 
-        // Background visual elements
-        this.clouds = [
-            { x: 30, y: 80, size: 35 },
-            { x: 180, y: 50, size: 45 },
-            { x: 310, y: 100, size: 30 }
-        ];
-
-        this.buildings = Array.from({ length: 8 }, (_, i) => ({
-            x: i * 50,
-            w: 35 + Math.random() * 15,
-            h: 40 + Math.random() * 50
-        }));
-
-        // Initialize sub-systems and entities
+        // Systems and Entities
+        this.soundManager = new SoundManager();
+        this.background = new Background();
         this.player = new Player();
         this.enemyManager = new EnemyManager();
         this.particleSystem = new ParticleSystem();
         this.hud = new HUD();
 
-        // Bind and setup input
-        this.handleAction = this.handleAction.bind(this);
-        this.inputHandler = new InputHandler(this.canvas, this.handleAction);
+        // Bind input handlers
+        this.handleJump = this.handleJump.bind(this);
+        this.handleDash = this.handleDash.bind(this);
+        this.handleToggleAudio = this.handleToggleAudio.bind(this);
+        this.isAudioButtonClicked = this.isAudioButtonClicked.bind(this);
 
-        // Bind and setup game loop
+        this.inputHandler = new InputHandler(
+            this.canvas,
+            this.handleJump,
+            this.handleDash,
+            this.handleToggleAudio,
+            this.isAudioButtonClicked
+        );
+
+        // Bind game loop
         this.update = this.update.bind(this);
         this.render = this.render.bind(this);
         this.loop = new GameLoop(this.update, this.render);
@@ -52,61 +54,95 @@ export class Game {
         this.loop.start();
     }
 
-    handleAction() {
+    isAudioButtonClicked(x, y) {
+        return this.hud.isAudioButtonClicked(x, y);
+    }
+
+    handleToggleAudio() {
+        this.soundManager.toggleMute();
+    }
+
+    handleJump() {
+        this.soundManager.resume();
+
         if (this.currentState === GAME_STATES.IDLE) {
             this.currentState = GAME_STATES.PLAYING;
+            this.soundManager.startBGM();
             this.player.flap();
-            this.hud.triggerFlapFeedback();
+            this.soundManager.playJump();
             this.particleSystem.emitFlap(this.player.x, this.player.y);
         } else if (this.currentState === GAME_STATES.PLAYING) {
             this.player.flap();
-            this.hud.triggerFlapFeedback();
+            this.soundManager.playJump();
             this.particleSystem.emitFlap(this.player.x, this.player.y);
         } else if (this.currentState === GAME_STATES.GAMEOVER) {
-            // Only allow restart after the bird settles on the ground
+            // Only allow restart after the bird settles near the ground
             const groundLimit = CANVAS.HEIGHT - WORLD.GROUND_HEIGHT;
             if (this.player.y + this.player.radius >= groundLimit - 2) {
                 this.enemyManager.reset();
                 this.particleSystem.clear();
+                this.background.reset();
                 this.score = 0;
+                this.currentStars = 0;
                 this.player.reset();
                 this.currentState = GAME_STATES.IDLE;
             }
         }
     }
 
+    handleDash() {
+        if (this.currentState !== GAME_STATES.PLAYING) return;
+
+        if (this.player.dash()) {
+            this.soundManager.playDash();
+            this.hud.triggerShake(4, 8);
+            this.particleSystem.emitDash(this.player.x, this.player.y);
+        }
+    }
+
     triggerGameOver() {
+        if (this.currentState === GAME_STATES.GAMEOVER) return;
+
         this.currentState = GAME_STATES.GAMEOVER;
-        this.hud.triggerShake(10, 14);
+        this.soundManager.stopBGM();
+        this.soundManager.playBump();
+        this.hud.triggerShake(12, 16);
         this.particleSystem.emitImpact(this.player.x, this.player.y);
     }
 
     update(dt, dtFactor, frames) {
+        this.frames = frames;
+        const isGameOver = (this.currentState === GAME_STATES.GAMEOVER);
+
         this.hud.update(dtFactor);
         this.particleSystem.update(dtFactor);
-
-        // Update ground moving stripes
-        if (this.currentState !== GAME_STATES.GAMEOVER) {
-            this.groundOffset = (this.groundOffset + PIPE_CONFIG.SPEED * dtFactor) % 20;
-        }
-
-        // Update bird entity
+        this.background.update(dtFactor, isGameOver);
         this.player.update(frames, this.currentState, dtFactor);
 
         if (this.currentState === GAME_STATES.PLAYING) {
-            // Update pipes and detect scoring
+            // Update obstacles and star pickups
             this.enemyManager.update(
                 frames,
                 this.player,
                 (scoreX, scoreY) => {
+                    // Pipe passed
                     this.score++;
                     this.hud.saveHighScore(this.score);
                     this.particleSystem.emitScore(scoreX, scoreY);
                 },
+                (starX, starY) => {
+                    // Star collected
+                    this.currentStars++;
+                    this.score += STAR_CONFIG.SCORE_VALUE;
+                    this.hud.addStar();
+                    this.hud.saveHighScore(this.score);
+                    this.soundManager.playStar();
+                    this.particleSystem.emitStar(starX, starY);
+                },
                 dtFactor
             );
 
-            // Collision check: Ground
+            // Ground collision
             const groundLimit = CANVAS.HEIGHT - WORLD.GROUND_HEIGHT;
             if (Physics.checkCircleGround(this.player.getCircle(), groundLimit)) {
                 this.player.y = groundLimit - this.player.radius;
@@ -114,12 +150,14 @@ export class Game {
                 return;
             }
 
-            // Collision check: Pipes
-            const colliders = this.enemyManager.getColliders();
-            for (const box of colliders) {
-                if (Physics.checkCircleAABB(this.player.getCircle(), box)) {
-                    this.triggerGameOver();
-                    return;
+            // Pipe collisions (Air Dash gives invulnerability through obstacles!)
+            if (!this.player.isDashing) {
+                const colliders = this.enemyManager.getColliders();
+                for (const box of colliders) {
+                    if (Physics.checkCircleAABB(this.player.getCircle(), box)) {
+                        this.triggerGameOver();
+                        return;
+                    }
                 }
             }
         }
@@ -131,77 +169,30 @@ export class Game {
         // Apply screen shake
         const shakeApplied = this.hud.applyShake(ctx);
 
-        // Draw background scenery and ground
-        this.drawBackground();
+        // 1. Dynamic Parallax Background
+        this.background.draw(ctx, this.score, this.frames);
 
-        // Draw pipes
+        // 2. Pipes and Collectibles
         this.enemyManager.draw(ctx);
 
-        // Draw player
+        // 3. Player Bird
         this.player.draw(ctx);
 
-        // Draw particle effects
+        // 4. Particle Effects
         this.particleSystem.draw(ctx);
 
-        // Restore shake transform
+        // Restore screen shake transform
         this.hud.restoreShake(ctx, shakeApplied);
 
-        // Draw UI / HUD on top
-        this.hud.draw(ctx, this.currentState, this.score);
-    }
-
-    drawBackground() {
-        const ctx = this.ctx;
-        const W = CANVAS.WIDTH;
-        const H = CANVAS.HEIGHT;
-        const groundH = WORLD.GROUND_HEIGHT;
-
-        // Sky
-        ctx.fillStyle = '#70c5ce';
-        ctx.fillRect(0, 0, W, H);
-
-        // Distant buildings
-        ctx.fillStyle = '#4fa8b0';
-        for (const b of this.buildings) {
-            ctx.fillRect(b.x, H - groundH - b.h, b.w, b.h);
-        }
-
-        // Clouds
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-        for (const c of this.clouds) {
-            ctx.beginPath();
-            ctx.arc(c.x, c.y, c.size, 0, Math.PI * 2);
-            ctx.arc(c.x + 15, c.y - 10, c.size * 0.7, 0, Math.PI * 2);
-            ctx.arc(c.x + 30, c.y, c.size * 0.8, 0, Math.PI * 2);
-            ctx.fill();
-        }
-
-        // Ground
-        ctx.fillStyle = '#ded895';
-        ctx.fillRect(0, H - groundH, W, groundH);
-
-        // Grass top band
-        ctx.fillStyle = '#73bf2e';
-        ctx.fillRect(0, H - groundH, W, 16);
-        ctx.fillStyle = '#529c1e';
-        ctx.fillRect(0, H - groundH + 16, W, 4);
-
-        // Ground diagonal pattern
-        ctx.strokeStyle = '#cbb86b';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        for (let x = -20; x < W + 20; x += 20) {
-            ctx.moveTo(x - this.groundOffset, H - groundH + 20);
-            ctx.lineTo(x - this.groundOffset - 10, H);
-        }
-        ctx.stroke();
-
-        // Divider black stroke
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(0, H - groundH);
-        ctx.lineTo(W, H - groundH);
-        ctx.stroke();
+        // 5. HUD and UI Overlay
+        this.hud.draw(
+            ctx,
+            this.currentState,
+            this.score,
+            this.currentStars,
+            this.player,
+            this.soundManager.muted,
+            this.frames
+        );
     }
 }

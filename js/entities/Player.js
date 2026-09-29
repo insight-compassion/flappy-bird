@@ -1,5 +1,5 @@
 /**
- * Player (Flappy Bird) Entity
+ * Player (Flappy Bird) Entity with Air Dash Skill and Ghost Trails
  */
 import { Entity } from './Entity.js';
 import { BIRD_CONFIG, WORLD, CANVAS, GAME_STATES } from '../config.js';
@@ -13,6 +13,12 @@ export class Player extends Entity {
         this.jump = BIRD_CONFIG.JUMP_FORCE;
         this.rotation = 0;
         this.wingAngle = 0;
+
+        // Skill: Air Dash
+        this.dashCooldown = 0;
+        this.dashTimer = 0;
+        this.isDashing = false;
+        this.ghostTrails = [];
     }
 
     reset() {
@@ -21,28 +27,84 @@ export class Player extends Entity {
         this.vy = 0;
         this.rotation = 0;
         this.wingAngle = 0;
+        this.dashCooldown = 0;
+        this.dashTimer = 0;
+        this.isDashing = false;
+        this.ghostTrails = [];
     }
 
     flap() {
         this.vy = this.jump;
     }
 
+    canDash() {
+        return this.dashCooldown <= 0;
+    }
+
+    dash() {
+        if (!this.canDash()) return false;
+        this.isDashing = true;
+        this.dashTimer = BIRD_CONFIG.DASH_DURATION_FRAMES;
+        this.dashCooldown = BIRD_CONFIG.DASH_COOLDOWN_FRAMES;
+        this.vy = BIRD_CONFIG.DASH_IMPULSE_VY; // Stabilize glide
+        return true;
+    }
+
+    getDashCooldownProgress() {
+        if (this.dashCooldown <= 0) return 1.0;
+        return 1.0 - (this.dashCooldown / BIRD_CONFIG.DASH_COOLDOWN_FRAMES);
+    }
+
     update(frames, state, dtFactor = 1) {
         if (state === GAME_STATES.IDLE) {
-            // Idle floating animation
             this.y = BIRD_CONFIG.START_Y + Math.sin(frames * 0.08) * 6;
             this.rotation = 0;
             this.wingAngle = Math.sin(frames * 0.2) * 0.5;
+            this.dashCooldown = 0;
+            this.isDashing = false;
+            this.ghostTrails = [];
         } else if (state === GAME_STATES.PLAYING) {
-            this.vy += this.gravity * dtFactor;
-            this.y += this.vy * dtFactor;
+            // Update Dash skill status
+            if (this.isDashing) {
+                this.dashTimer -= dtFactor;
 
-            // Rotation clamped between -30 deg and 90 deg
-            this.rotation = Math.min(
-                BIRD_CONFIG.ROTATION_MAX_DOWN,
-                Math.max(BIRD_CONFIG.ROTATION_MAX_UP, this.vy * BIRD_CONFIG.ROTATION_SPEED_FACTOR)
-            );
-            this.wingAngle = Math.sin(frames * 0.4) * 0.6;
+                // Push ghost trail for speed blur
+                if (frames % 2 === 0) {
+                    this.ghostTrails.push({
+                        x: this.x,
+                        y: this.y,
+                        rotation: this.rotation,
+                        radius: this.radius,
+                        alpha: 0.6
+                    });
+                }
+
+                // Mild floating gravity during dash
+                this.vy += this.gravity * 0.2 * dtFactor;
+                this.y += this.vy * dtFactor;
+                this.rotation = -0.15; // aerodynamic streamlined angle
+                this.wingAngle = 0.8;
+
+                if (this.dashTimer <= 0) {
+                    this.isDashing = false;
+                }
+            } else {
+                // Normal physics
+                this.vy += this.gravity * dtFactor;
+                this.y += this.vy * dtFactor;
+
+                // Rotation calculation
+                this.rotation = Math.min(
+                    BIRD_CONFIG.ROTATION_MAX_DOWN,
+                    Math.max(BIRD_CONFIG.ROTATION_MAX_UP, this.vy * BIRD_CONFIG.ROTATION_SPEED_FACTOR)
+                );
+                this.wingAngle = Math.sin(frames * 0.4) * 0.6;
+            }
+
+            // Recover dash cooldown
+            if (this.dashCooldown > 0) {
+                this.dashCooldown = Math.max(0, this.dashCooldown - dtFactor);
+            }
 
             // Ceiling constraint
             if (this.y - this.radius <= 0) {
@@ -50,7 +112,7 @@ export class Player extends Entity {
                 this.vy = 0;
             }
         } else if (state === GAME_STATES.GAMEOVER) {
-            // Death fall animation
+            this.isDashing = false;
             const groundLimit = CANVAS.HEIGHT - WORLD.GROUND_HEIGHT;
             if (this.y + this.radius < groundLimit) {
                 this.vy += this.gravity * WORLD.DEAD_GRAVITY_MULTIPLIER * dtFactor;
@@ -58,15 +120,50 @@ export class Player extends Entity {
                 this.rotation = Math.PI / 2;
             }
         }
+
+        // Fade and prune ghost afterimages
+        for (let i = this.ghostTrails.length - 1; i >= 0; i--) {
+            const t = this.ghostTrails[i];
+            t.alpha -= 0.08 * dtFactor;
+            if (t.alpha <= 0) {
+                this.ghostTrails.splice(i, 1);
+            }
+        }
     }
 
     draw(ctx) {
+        // Draw Dash ghost trails
+        for (const t of this.ghostTrails) {
+            ctx.save();
+            ctx.globalAlpha = t.alpha;
+            ctx.translate(t.x, t.y);
+            ctx.rotate(t.rotation);
+            ctx.fillStyle = '#38bdf8';
+            ctx.beginPath();
+            ctx.arc(0, 0, t.radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
         ctx.save();
         ctx.translate(this.x, this.y);
         ctx.rotate(this.rotation);
 
-        // Body (Yellow circle)
-        ctx.fillStyle = '#facc15';
+        // Dash aura glow
+        if (this.isDashing) {
+            ctx.save();
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 4;
+            ctx.shadowColor = '#0284c7';
+            ctx.shadowBlur = 12;
+            ctx.beginPath();
+            ctx.ellipse(-4, 0, this.radius + 6, this.radius + 2, 0, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        // Body (Yellow circle, with dash tint)
+        ctx.fillStyle = this.isDashing ? '#fef08a' : '#facc15';
         ctx.strokeStyle = '#000000';
         ctx.lineWidth = 2;
         ctx.beginPath();

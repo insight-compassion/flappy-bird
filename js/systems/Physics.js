@@ -30,6 +30,20 @@ export class Physics {
     }
 
     /**
+     * Checks collision between two circles (e.g. bird and star item)
+     * @param {Object} c1 { x, y, radius }
+     * @param {Object} c2 { x, y, radius }
+     * @returns {boolean}
+     */
+    static checkCircleCircle(c1, c2) {
+        const dx = c1.x - c2.x;
+        const dy = c1.y - c2.y;
+        const distSq = dx * dx + dy * dy;
+        const radiusSum = c1.radius + c2.radius;
+        return distSq <= radiusSum * radiusSum;
+    }
+
+    /**
      * Standard AABB vs AABB collision.
      * @param {Object} rectA { x, y, width, height }
      * @param {Object} rectB { x, y, width, height }
